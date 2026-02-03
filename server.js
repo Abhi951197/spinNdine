@@ -17,6 +17,22 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
+// Simple request logger to help debugging (prints method and url)
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ success: true, uptime: process.uptime() });
+});
+
+// Helpful GET handler for /api/restaurants when someone hits it from a browser
+app.get('/api/restaurants', (req, res) => {
+  res.status(405).json({ success: false, error: "Use POST with JSON body: { latitude, longitude }" });
+});
+
 const PORT = 5000;
 
 /**
@@ -79,6 +95,57 @@ app.post('/api/random-restaurant', async (req, res) => {
     };
 
     res.json({ success: true, restaurant });
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch restaurants',
+    });
+  }
+});
+
+// POST /api/restaurants - return a list of nearby restaurants (normalized)
+app.post('/api/restaurants', async (req, res) => {
+  const { latitude, longitude, radius = 5000, limit = 10 } = req.body;
+
+  if (!latitude || !longitude) {
+    return res.status(400).json({
+      success: false,
+      error: 'Latitude and longitude required',
+    });
+  }
+
+  try {
+    const response2 = await axios.get('https://places-api.foursquare.com/places/search', {
+      params: {
+        ll: `${latitude},${longitude}`,
+        radius,
+        categories: '13065', // Restaurants
+        limit,
+      },
+      headers: {
+        Authorization: `Bearer ${process.env.FOURSQUARE_SERVICE_TOKEN}`,
+        'X-Places-Api-Version': '2025-06-17',
+        Accept: 'application/json',
+      },
+    });
+
+    const places2 = response2.data.results || [];
+
+    const restaurants = places2.map((p) => ({
+      fsqId: p.fsq_id,
+      name: p.name,
+      rating: p.rating ?? null,
+      address: p.location?.formatted_address ?? 'Address not available',
+      website: p.website ?? null,
+      photoUrl:
+        p.photos?.length > 0 ? `${p.photos[0].prefix}original${p.photos[0].suffix}` : null,
+      mapsUrl: p.geocodes?.main
+        ? `https://www.google.com/maps/search/?api=1&query=${p.geocodes.main.latitude},${p.geocodes.main.longitude}`
+        : null,
+    }));
+
+    res.json({ success: true, restaurants });
   } catch (err) {
     console.error(err.response?.data || err.message);
     res.status(500).json({
