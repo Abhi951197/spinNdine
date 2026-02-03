@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "SpinDine",
+    "slug": "spinndine",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.spinndine.app"
+    },
+    "android": {
+      "package": "com.spinndine.app"
+    }
+  }
+}
