@@ -28,12 +28,17 @@ app.get('/api/health', (req, res) => {
   res.json({ success: true, uptime: process.uptime() });
 });
 
+// Quick test endpoint for deployment verification
+app.get('/api', (req, res) => {
+  res.json({ success: true, message: 'API is running' });
+});
+
 // Helpful GET handler for /api/restaurants when someone hits it from a browser
 app.get('/api/restaurants', (req, res) => {
   res.status(405).json({ success: false, error: "Use POST with JSON body: { latitude, longitude }" });
 });
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
 /**
  * POST /api/random-restaurant
@@ -155,6 +160,10 @@ app.post('/api/restaurants', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ Backend running at http://localhost:${PORT}`);
-});
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`Backend running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

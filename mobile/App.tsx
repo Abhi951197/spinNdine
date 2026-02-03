@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   ActivityIndicator,
-  ScrollView,
   TouchableOpacity,
   Image,
   Linking,
@@ -18,7 +17,14 @@ import * as Location from 'expo-location';
 
 // Change this to your backend URL
 // For testing: use your machine's IP address
-const BACKEND_URL = 'http://localhost:5000';
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'http://localhost:5000';
+const shadow = (ios: Record<string, any>, elevation: number, boxShadow: string) =>
+  (Platform.select({
+    ios,
+    android: { elevation },
+    web: { boxShadow },
+    default: {},
+  }) as Record<string, any>);
 
 interface Restaurant {
   name: string;
@@ -47,26 +53,27 @@ export default function App() {
   const [cityLabel, setCityLabel] = useState<string | null>(null);
 
   const wheelRotation = useRef(new Animated.Value(0)).current;
-  const cumulativeRotation = useRef(0);
+  const absoluteRotation = useRef(0);
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(30)).current;
 
   const { width, height } = Dimensions.get('window');
-  const wheelSize = Math.min(Math.min(width, height) * 0.75, 360);
+  const wheelSize = Math.min(Math.min(width, height) * 0.62, 320);
 
   useEffect(() => {
     getLocation();
+    const useNative = Platform.OS !== 'web';
     Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 1,
         duration: 800,
-        useNativeDriver: true,
+        useNativeDriver: useNative,
       }),
       Animated.timing(slideAnim, {
         toValue: 0,
         duration: 600,
         easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: useNative,
       }),
     ]).start();
   }, []);
@@ -77,8 +84,8 @@ export default function App() {
     }
   }, [location]);
 
-  const formatPlace = (city?: string | null, region?: string | null) => {
-    const parts = [city, region].filter(Boolean);
+  const formatPlace = (primary?: string | null, secondary?: string | null) => {
+    const parts = [primary, secondary].filter(Boolean);
     return parts.length > 0 ? parts.join(', ') : 'Current area';
   };
 
@@ -86,12 +93,39 @@ export default function App() {
     try {
       if (Platform.OS !== 'web') {
         const [place] = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
-        const city = place?.city || place?.subregion || place?.region || place?.district || null;
-        const region = place?.region || place?.country || null;
-        setCityLabel(formatPlace(city, region));
+        const primary =
+          place?.name ||
+          place?.suburb ||
+          place?.subregion ||
+          place?.district ||
+          place?.city ||
+          place?.town ||
+          place?.village ||
+          place?.region ||
+          null;
+        const secondary = place?.city || place?.region || place?.country || null;
+        setCityLabel(formatPlace(primary, secondary));
       }
     } catch {
       // ignore reverse geocode failures
+    }
+  };
+
+  const setPlaceFromWeb = async (lat: number, lng: number) => {
+    try {
+      const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`;
+      const resp = await fetch(url);
+      const j = await resp.json();
+      const primary =
+        j?.locality ||
+        j?.city ||
+        j?.principalSubdivision ||
+        j?.localityInfo?.administrative?.[0]?.name ||
+        null;
+      const secondary = j?.city || j?.principalSubdivision || j?.countryName || null;
+      setCityLabel(formatPlace(primary, secondary));
+    } catch {
+      // ignore
     }
   };
 
@@ -126,9 +160,7 @@ export default function App() {
             setLocation({ latitude, longitude });
             setLocationLoading(false);
             try {
-              const resp = await fetch('https://ipapi.co/json/');
-              const j = await resp.json();
-              setCityLabel(formatPlace(j.city, j.region));
+              await setPlaceFromWeb(latitude, longitude);
             } catch {
               setCityLabel('Current area');
             }
@@ -139,7 +171,11 @@ export default function App() {
               const resp = await fetch('https://ipapi.co/json/');
               const j = await resp.json();
               setLocation({ latitude: j.latitude, longitude: j.longitude });
-              setCityLabel(formatPlace(j.city, j.region));
+              if (j.latitude && j.longitude) {
+                await setPlaceFromWeb(j.latitude, j.longitude);
+              } else {
+                setCityLabel(formatPlace(j.city, j.region));
+              }
             } catch (e) {
               setLocation({ latitude: 40.7128, longitude: -74.006 });
               setCityLabel('New York, NY');
@@ -178,7 +214,7 @@ export default function App() {
         setRestaurants(data.restaurants || []);
         setSelectedIndex(null);
         setSelectedRestaurant(null);
-        cumulativeRotation.current = 0;
+        absoluteRotation.current = 0;
         wheelRotation.setValue(0);
       } else {
         setError(data.error || 'Failed to fetch restaurants');
@@ -201,7 +237,18 @@ export default function App() {
     });
   };
 
-  const shortName = (name: string, max = 16) => (name.length > max ? name.slice(0, max - 1) + '…' : name);
+  const shortName = (name: string, max = 16) => (name.length > max ? name.slice(0, max - 1) + '...' : name);
+  const getLabelMaxWidth = (n: number, radius: number) => {
+    const arc = (2 * Math.PI * radius) / n;
+    return Math.max(44, Math.min(90, arc - 10));
+  };
+
+  const getLabelFontSize = (name: string, n: number) => {
+    const base = n >= 12 ? 9 : n >= 10 ? 10 : n >= 8 ? 11 : 12;
+    if (name.length > 18) return Math.max(8, base - 2);
+    if (name.length > 14) return Math.max(9, base - 1);
+    return base;
+  };
 
   const spinWheel = () => {
     if (spinning || restaurants.length === 0) return;
@@ -209,27 +256,25 @@ export default function App() {
 
     const n = restaurants.length;
     const segment = 360 / n;
-    const targetIndex = Math.floor(Math.random() * n);
+    const fullTurns = 6;
+    const randomOffset = Math.random() * 360;
+    const totalRotation = fullTurns * 360 + randomOffset;
 
-    // Calculate the angle to point the top pointer at the center of the winning segment
-    // Pointer is at top (0°), segments start at top and go clockwise
-    const targetAngle = targetIndex * segment;
-    
-    const fullTurns = 5;
-    const totalRotation = fullTurns * 360 + targetAngle;
-
-    const start = cumulativeRotation.current;
+    const start = absoluteRotation.current;
     const end = start + totalRotation;
 
     Animated.timing(wheelRotation, {
       toValue: end,
-      duration: 4000,
+      duration: 4200,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: Platform.OS !== 'web',
     }).start(() => {
-      cumulativeRotation.current = end % 360;
-      setSelectedIndex(targetIndex);
-      setSelectedRestaurant(restaurants[targetIndex]);
+      absoluteRotation.current = end;
+      const rotationMod = ((end % 360) + 360) % 360;
+      const adjusted = (360 - rotationMod) % 360;
+      const landedIndex = Math.floor(adjusted / segment) % n;
+      setSelectedIndex(landedIndex);
+      setSelectedRestaurant(restaurants[landedIndex]);
       setSpinning(false);
     });
   };
@@ -261,11 +306,7 @@ export default function App() {
           },
         ]}
       >
-        <ScrollView 
-          showsVerticalScrollIndicator={false} 
-          contentContainerStyle={styles.scrollContent}
-          bounces={true}
-        >
+        <View style={styles.scrollContent}>
           {/* Header */}
           <View style={styles.header}>
             <View style={styles.headerTop}>
@@ -452,6 +493,8 @@ export default function App() {
                         const labelRadius = wheelSize / 2.6;
                         const x = Math.cos(rad) * labelRadius;
                         const y = Math.sin(rad) * labelRadius;
+                        const maxWidth = getLabelMaxWidth(n, labelRadius);
+                        const fontSize = getLabelFontSize(r.name, n);
 
                         return (
                           <View
@@ -462,22 +505,29 @@ export default function App() {
                                 left: wheelSize / 2 + x,
                                 top: wheelSize / 2 + y,
                                 transform: [
-                                  { translateX: -60 },
+                                  { translateX: -maxWidth / 2 },
                                   { translateY: -16 },
                                   { rotate: `${angle + 90}deg` },
                                 ],
                               },
                             ]}
                           >
-                            <View style={[
-                              styles.label,
-                              selectedIndex === i && styles.labelSelected
-                            ]}>
-                              <Text style={[
-                                styles.labelText,
-                                selectedIndex === i && styles.labelTextSelected
-                              ]} numberOfLines={1}>
-                                {shortName(r.name, 14)}
+                            <View
+                              style={[
+                                styles.label,
+                                { maxWidth },
+                                selectedIndex === i && styles.labelSelected,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.labelText,
+                                  { fontSize },
+                                  selectedIndex === i && styles.labelTextSelected,
+                                ]}
+                                numberOfLines={2}
+                              >
+                                {shortName(r.name, 20)}
                               </Text>
                             </View>
                           </View>
@@ -569,7 +619,7 @@ export default function App() {
           <View style={styles.footer}>
             <Text style={styles.footerText}>Made with ❤️ for food lovers</Text>
           </View>
-        </ScrollView>
+        </View>
       </Animated.View>
     </View>
   );
@@ -619,7 +669,9 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingBottom: 40,
+    flex: 1,
+    paddingBottom: 16,
+    justifyContent: 'space-between',
   },
   header: {
     paddingHorizontal: 20,
@@ -644,11 +696,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 4,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.08, shadowRadius: 12 },
+      4,
+      '0px 8px 18px rgba(0,0,0,0.08)'
+    ),
   },
   logoEmoji: {
     fontSize: 26,
@@ -683,11 +735,11 @@ const styles = StyleSheet.create({
     padding: 16,
     borderRadius: 20,
     marginTop: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    elevation: 3,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 12 },
+      3,
+      '0px 8px 20px rgba(0,0,0,0.06)'
+    ),
   },
   locationCardHeader: {
     flexDirection: 'row',
@@ -743,11 +795,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF',
     padding: 16,
     borderRadius: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.04, shadowRadius: 8 },
+      2,
+      '0px 6px 14px rgba(0,0,0,0.04)'
+    ),
   },
   statNumber: {
     fontSize: 24,
@@ -827,11 +879,11 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderRadius: 20,
     marginBottom: 24,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8 },
+      2,
+      '0px 6px 14px rgba(0,0,0,0.06)'
+    ),
   },
   wheelInfoText: {
     fontSize: 15,
@@ -854,11 +906,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF',
     borderRadius: 20,
     padding: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
-    elevation: 6,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 12 },
+      6,
+      '0px 10px 22px rgba(0,0,0,0.15)'
+    ),
   },
   pointer: {
     width: 0,
@@ -880,11 +932,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.15,
-    shadowRadius: 30,
-    elevation: 15,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.15, shadowRadius: 30 },
+      15,
+      '0px 18px 40px rgba(0,0,0,0.15)'
+    ),
     borderWidth: 8,
     borderColor: '#FFF',
   },
@@ -914,17 +966,15 @@ const styles = StyleSheet.create({
   },
   label: {
     backgroundColor: 'rgba(255, 255, 255, 0.95)',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
     borderRadius: 12,
-    minWidth: 100,
-    maxWidth: 120,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4 },
+      3,
+      '0px 4px 10px rgba(0,0,0,0.1)'
+    ),
     borderWidth: 2,
     borderColor: 'rgba(255, 255, 255, 0.8)',
   },
@@ -939,6 +989,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1A1A1A',
     textAlign: 'center',
+    lineHeight: 13,
   },
   labelTextSelected: {
     color: '#FFF',
@@ -951,11 +1002,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#1A1A1A',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 10,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 12 },
+      10,
+      '0px 10px 22px rgba(0,0,0,0.3)'
+    ),
     borderWidth: 5,
     borderColor: '#FFF',
   },
@@ -971,11 +1022,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 48,
     borderRadius: 30,
     marginBottom: 28,
-    shadowColor: '#FF6B6B',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.4,
-    shadowRadius: 20,
-    elevation: 8,
+    ...shadow(
+      { shadowColor: '#FF6B6B', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.4, shadowRadius: 20 },
+      8,
+      '0px 14px 28px rgba(255,107,107,0.4)'
+    ),
     minWidth: 200,
   },
   spinButtonDisabled: {
@@ -993,11 +1044,11 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     overflow: 'hidden',
     width: '100%',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.15,
-    shadowRadius: 24,
-    elevation: 12,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.15, shadowRadius: 24 },
+      12,
+      '0px 18px 36px rgba(0,0,0,0.15)'
+    ),
   },
   resultBadge: {
     backgroundColor: '#10B981',
@@ -1086,11 +1137,11 @@ const styles = StyleSheet.create({
   },
   primaryButton: {
     backgroundColor: '#1A1A1A',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 12,
-    elevation: 4,
+    ...shadow(
+      { shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 12 },
+      4,
+      '0px 8px 18px rgba(0,0,0,0.2)'
+    ),
   },
   secondaryButton: {
     backgroundColor: '#F3F4F6',
